@@ -151,3 +151,21 @@ test('parseHermesVerdict 死循环防护：空/无 decision 不挂起', () => {
   assert.equal(parseHermesVerdict('').ok, false)
   assert.equal(parseHermesVerdict('no json here').ok, false)
 })
+
+test('userGranted 命中时 prompt 含授权背书信号', () => {
+  const c = { ...defaultConfig(), userGranted: ['bash'] }
+  const p = buildHermesPrompt(c, mkReq('bash', '写入审计文件'))
+  assert.ok(p.includes('用户已明确授权此工具'))
+  assert.ok(p.includes('bash'))
+})
+
+test('userGranted 未命中时 prompt 无背书信号', () => {
+  const c = { ...defaultConfig(), userGranted: ['calendar_add'] }
+  const p = buildHermesPrompt(c, mkReq('bash'))
+  assert.ok(!p.includes('用户已明确授权此工具'))
+})
+
+test('userGranted 缺省/非数组时 validateConfig 处理', () => {
+  assert.equal(validateConfig({ mode: 'hermes', userGranted: 'not-array' }).ok, false)
+  assert.equal(validateConfig({ mode: 'hermes', userGranted: ['bash'] }).ok, true)
+})

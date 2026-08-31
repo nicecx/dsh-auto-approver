@@ -23,6 +23,7 @@ export function defaultConfig() {
     hermesTimeoutSecs: 90,          // Hermes 裁决超时（秒）
     feedbackOnReject: true,         // 拒绝时是否把原因 followup 回发起会话
     qnaMode: 'off',                 // 'hermes'=ask_user_question 交 Hermes Pro 回答；'off'=转人工
+    userGranted: [],               // 用户明确授权的工具清单（写入 Hermes prompt 作为背书信号）
     logPath: undefined, // 默认由插件层解析为 ~/.dsh/auto-approver.log
   }
 }
@@ -33,7 +34,7 @@ export function validateConfig(cfg) {
   if (cfg.mode !== undefined && !MODES.includes(cfg.mode)) {
     return { ok: false, error: `mode 应为 ${MODES.join('/')}，收到: ${cfg.mode}` }
   }
-  for (const key of ['allowlist', 'denyAlways']) {
+  for (const key of ['allowlist', 'denyAlways', 'userGranted']) {
     if (cfg[key] !== undefined && !Array.isArray(cfg[key])) {
       return { ok: false, error: `${key} 应为数组` }
     }
@@ -83,15 +84,19 @@ export function rejectReason(cfg, req) {
 export function buildHermesPrompt(cfg, req) {
   const tool = String(req?.toolName || '')
   const reason = String(req?.reason || '')
-  return [
+  const granted = Array.isArray(cfg.userGranted) ? cfg.userGranted : []
+  const lines = [
     '你是 DSH 审批裁决员。请对下面这次权限请求给出裁决。',
     '',
     `请求工具: ${tool}`,
     `请求原因: ${reason || '（未给出）'}`,
-    '',
-    '请只输出一行 JSON：{"decision":"allowed-once"|"rejected","reason":"一句话理由（若拒绝，说明哪里不好、建议怎么改）"}',
-    '原则：危险操作（数据破坏、凭据外泄、不可逆删除）倾向拒绝；常规开发操作倾向批准。',
-  ].join('\n')
+  ]
+  if (granted.includes(tool)) {
+    lines.push('', `⚠️ 用户已明确授权此工具（userGranted 清单包含 ${tool}）：在业务合理且无数据破坏/凭据外泄风险时，应倾向于批准。`)
+  }
+  lines.push('', '请只输出一行 JSON：{"decision":"allowed-once"|"rejected","reason":"一句话理由（若拒绝，说明哪里不好、建议怎么改）"}')
+  lines.push('原则：危险操作（数据破坏、凭据外泄、不可逆删除）倾向拒绝；常规开发操作倾向批准。')
+  return lines.join('\n')
 }
 
 /**
