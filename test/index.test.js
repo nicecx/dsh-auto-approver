@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   defaultConfig, validateConfig, decide, makeAuditEntry,
   rejectReason, buildHermesPrompt, parseHermesVerdict,
+  buildQnaPrompt, parseQnaVerdict,
 } from '../src/policy.js'
 
 const mkReq = (toolName, reason = 'r', callId = 'c1') => ({
@@ -90,4 +91,31 @@ test('buildHermesPrompt 含工具与原因', () => {
   assert.ok(p.includes('bash'))
   assert.ok(p.includes('重载服务'))
   assert.ok(p.includes('allowed-once'))
+})
+
+test('buildQnaPrompt 包含问题与选项', () => {
+  const c = defaultConfig()
+  const questions = [{ id: 'q1', question: '选哪个？', options: [{ label: 'A' }, { label: 'B' }] }]
+  const p = buildQnaPrompt(c, questions, '会话上下文: 测试')
+  assert.ok(p.includes('q1'))
+  assert.ok(p.includes('选哪个？'))
+  assert.ok(p.includes('1. A'))
+  assert.ok(p.includes('会话上下文: 测试'))
+})
+
+test('parseQnaVerdict 解析序号/标签/自由文本', () => {
+  const questions = [
+    { id: 'q1', question: '选哪个？', options: [{ label: '方案A' }, { label: '方案B' }] },
+    { id: 'q2', question: '自由回答？', options: [] },
+  ]
+  const a1 = parseQnaVerdict('q1: 2\nq2: 自定义内容', questions)
+  assert.equal(a1[0].id, 'q1')
+  assert.deepEqual(a1[0].selected, ['方案B'])
+  assert.equal(a1[1].id, 'q2')
+  assert.deepEqual(a1[1].selected, ['自定义内容'])
+  // 未回答补空
+  const a2 = parseQnaVerdict('q1: 1', questions)
+  assert.deepEqual(a2[1].selected, [])
+  // 空输入
+  assert.deepEqual(parseQnaVerdict('', questions)[1].selected, [])
 })

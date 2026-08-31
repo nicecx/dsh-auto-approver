@@ -26,6 +26,7 @@ import { randomUUID } from 'node:crypto'
 import {
   defaultConfig, validateConfig, decide, rejectReason,
   buildHermesPrompt, parseHermesVerdict, makeAuditEntry,
+  buildQnaPrompt, parseQnaVerdict,
 } from './policy.js'
 
 const execFileAsync = promisify(execFile)
@@ -34,17 +35,34 @@ const FEEDBACK_PREFIX = '[系统·审批代理]'
 export const name = 'dsh-auto-approver'
 
 /** 调 Hermes Pro 做一次语义裁决（oneshot，纯文本，不注入会话）。 */
-async function askHermes(config, req) {
-  const prompt = buildHermesPrompt(config, req)
+async function askHermes(config, prompt) {
   try {
     const { stdout } = await execFileAsync('hermes', ['chat', '-q', prompt, '--oneshot', '-m', config.hermesModel], {
       timeout: (config.hermesTimeoutSecs || 90) * 1000,
       maxBuffer: 4 * 1024 * 1024,
     })
+    return stdout
+  } catch (err) {
+    throw new Error(`Hermes 调用失败: ${err.message}`)
+  }
+}
+
+/** 调 Hermes Pro 做审批语义裁决。 */
+async function askHermesVerdict(config, req) {
+  const prompt = buildHermesPrompt(config, req)
+  try {
+    const stdout = await askHermes(config, prompt)
     return parseHermesVerdict(stdout)
   } catch (err) {
-    return { ok: false, error: `Hermes 调用失败: ${err.message}` }
+    return { ok: false, error: err.message }
   }
+}
+
+/** 调 Hermes Pro 回答 ask_user_question（问答接管）。 */
+async function askHermesQna(config, questions, context) {
+  const prompt = buildQnaPrompt(config, questions, context)
+  const stdout = await askHermes(config, prompt)
+  return parseQnaVerdict(stdout, questions)
 }
 
 /** 把反馈 followup 回发起会话（互动闭环）。 */
@@ -91,7 +109,7 @@ export function apply(ctx, rawConfig = {}) {
 
       // 规则层判 hermes → 调 Hermes Pro 语义裁决
       if (decision === 'hermes') {
-        const verdict = await askHermes(config, req)
+        const verdict = await askHermesVerdict(config, req)
         if (verdict.ok) {
           decision = verdict.decision
           note = `hermes: ${verdict.reason}`
@@ -131,8 +149,41 @@ export function apply(ctx, rawConfig = {}) {
     return () => { off() }
   }, 'dsh-auto-approver: intercept')
 
+  // ── QnA 接管：ask_user_question → Hermes Pro 回答（qnaMode='hermes' 时）──
+  ctx.effect(() => {
+    const off = ctx.on('tools/execute', async (exec, next) => {
+      if (config.qnaMode !== 'hermes') return next()
+      if (exec?.name !== 'ask_user_question') return next()
+      if (exec?.agent === undefined) return next()
+      const args = exec.arguments ?? {}
+      const questions = Array.isArray(args.questions) ? args.questions : []
+      if (questions.length === 0) return next()
+      const sessionId = String(exec.agent.session.id || '')
+      try {
+        const answers = await askHermesQna(config, questions, exec.agent.session.title)
+        const value = { answers }
+        audit(makeAuditEntry({
+          req: { toolName: 'ask_user_question', reason: questions.map((q) => q.question).join(' | '), agent: { session: { id: sessionId } } },
+          decision: `qna:${answers.length}`, sessionId,
+        }))
+        ctx.logger?.info?.(`[dsh-auto-approver] qna 已由 Hermes 回答（会话 ${sessionId}，${answers.length} 题）`)
+        return {
+          isError: false,
+          value,
+          content: [{ type: 'text', text: JSON.stringify(value) }],
+        }
+      } catch (err) {
+        // Hermes 不可用 → 转人工（relay 照常推送）
+        ctx.logger?.warn?.(`[dsh-auto-approver] qna Hermes 不可用，转人工: ${err.message}`)
+        return next()
+      }
+    }, { prepend: true, global: true })
+
+    return () => { off() }
+  }, 'dsh-auto-approver: qna')
+
   ctx.logger?.info?.(
-    `[dsh-auto-approver] loaded (mode=${config.mode}, allowlist=${config.allowlist.length}, deny=${config.denyAlways.length}, hermes=${config.mode === 'hermes' ? config.hermesModel : '-'})`,
+    `[dsh-auto-approver] loaded (mode=${config.mode}, allowlist=${config.allowlist.length}, deny=${config.denyAlways.length}, hermes=${config.mode === 'hermes' ? config.hermesModel : '-'}, qna=${config.qnaMode ?? 'off'})`,
   )
 }
 

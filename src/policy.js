@@ -22,6 +22,7 @@ export function defaultConfig() {
     hermesModel: 'deepseek-v4-pro', // Hermes 裁决模型（Pro 最高能力）
     hermesTimeoutSecs: 90,          // Hermes 裁决超时（秒）
     feedbackOnReject: true,         // 拒绝时是否把原因 followup 回发起会话
+    qnaMode: 'off',                 // 'hermes'=ask_user_question 交 Hermes Pro 回答；'off'=转人工
     logPath: undefined, // 默认由插件层解析为 ~/.dsh/auto-approver.log
   }
 }
@@ -125,4 +126,73 @@ export function makeAuditEntry({ req, decision, sessionId, ts, note }) {
     decision,
     ...(note ? { note } : {}),
   }
+}
+
+// ── QnA（ask_user_question 接管）──
+
+/**
+ * 构造给 Hermes Pro 回答用户问题的 prompt。
+ * @param {object} cfg 配置
+ * @param {Array} questions ask_user_question 的 arguments.questions
+ * @param {string} [context] 可选：发起会话的简短上下文
+ */
+export function buildQnaPrompt(cfg, questions, context) {
+  const lines = [
+    '你是 DSH 的问答代理。用户（DSH 会话里的 agent）向人类提了以下问题，请以人类的立场给出最佳回答。',
+    '若问题有选项，必须从选项中选择（可给序号或完整标签）；若允许多选且确实需要多个，用逗号分隔。',
+    '若无选项（自由回答），给出简洁、具体、可执行的回答。',
+    '',
+    ...(context ? [`会话上下文: ${context}`] : []),
+    '',
+  ]
+  questions.forEach((q, i) => {
+    lines.push(`Q${i + 1} (id=${q.id}): ${q.question}`)
+    if (q.options?.length) {
+      lines.push(q.options.map((o, j) => `  ${j + 1}. ${o.label}${o.description ? `（${o.description}）` : ''}`).join('\n'))
+    }
+    if (q.multiSelect) lines.push('  （可多选，逗号分隔）')
+  })
+  lines.push('', '输出格式：每个问题一行 "qid: 选项序号或文本"，多问题用换行分隔。只输出回答，不要解释。')
+  return lines.join('\n')
+}
+
+/**
+ * 把 Hermes 的回答文本解析成 { answers: [{id, selected}] }（对齐 relay parseAnswer 语义）。
+ * 每行 "qid: 选择"；无 qid 前缀的行作用于第一个问题。
+ */
+export function parseQnaVerdict(raw, questions) {
+  const answers = []
+  const text = String(raw || '').trim()
+  if (text) {
+    const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean)
+    for (const line of lines) {
+      const m = line.match(/^([^:=：]{1,64})[:=：]\s*([\s\S]+)$/)
+      const qid = m ? m[1].trim() : null
+      const choice = m ? m[2].trim() : line
+      const q = qid
+        ? questions.find((c) => String(c.id) === qid)
+        : (answers.length === 0 ? questions[0] : null)
+      if (!q) continue
+      // 选项匹配：序号 或 标签
+      const selected = []
+      const parts = choice.split(/[,，、]/).map((p) => p.trim()).filter(Boolean)
+      for (const p of parts) {
+        const idx = Number(p)
+        if (Number.isInteger(idx) && idx >= 1 && idx <= q.options.length) {
+          selected.push(q.options[idx - 1].label)
+        } else if (q.options.some((o) => o.label === p)) {
+          selected.push(p)
+        } else {
+          selected.push(p) // 自由文本/自定义
+        }
+      }
+      answers.push({ id: q.id, selected, ...(q.multiSelect ? {} : {}) })
+      if (!qid) break // 无前缀只作用第一个问题
+    }
+  }
+  // 补未回答问题
+  for (const q of questions) {
+    if (!answers.some((a) => a.id === q.id)) answers.push({ id: q.id, selected: [] })
+  }
+  return answers
 }
