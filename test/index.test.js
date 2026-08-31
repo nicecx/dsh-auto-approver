@@ -135,3 +135,19 @@ test('parseHermesVerdict 解析 reason 含引号/括号的 JSON', () => {
   assert.equal(r.decision, 'allowed-once')
   assert.ok(r.reason.includes('常规'))
 })
+
+test('parseHermesVerdict 死循环防护：索引0+非法枚举 不挂起', () => {
+  const r = parseHermesVerdict('{"decision":"maybe"}')
+  assert.equal(r.ok, false)
+  assert.ok(r.error.includes('无合法裁决'))
+})
+
+test('parseHermesVerdict 死循环防护：索引0+未闭合 JSON 不挂起', () => {
+  const r = parseHermesVerdict('{"decision":"allowed-once","reason":"未闭合')
+  assert.equal(r.ok, false)
+})
+
+test('parseHermesVerdict 死循环防护：空/无 decision 不挂起', () => {
+  assert.equal(parseHermesVerdict('').ok, false)
+  assert.equal(parseHermesVerdict('no json here').ok, false)
+})

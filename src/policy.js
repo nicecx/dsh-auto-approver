@@ -94,40 +94,63 @@ export function buildHermesPrompt(cfg, req) {
   ].join('\n')
 }
 
-/** 解析 Hermes 返回的裁决 JSON（容错：去代码块/装饰框、取首个 JSON 对象）。 */
+/**
+ * 解析 Hermes 返回的裁决 JSON（容错：装饰框/日志回显/示例 JSON 干扰）。
+ *
+ * 陷阱：Hermes oneshot 输出以 `Query: ...` 回显整个 prompt，而 prompt 里
+ * 包含示例 JSON（`{"decision":"allowed-once"|"rejected",...}`，含 `|` 与
+ * 未闭合引号）——若提取第一个 `{"decision"` 会命中示例导致解析失败。
+ * 因此必须**从后往前**找（Hermes 的回答在输出末尾），且只接受 decision
+ * 值为合法枚举的完整 JSON。
+ */
 export function parseHermesVerdict(raw) {
   try {
-    // Hermes oneshot 输出常带装饰框（╭─ ⚕ Hermes ─╮ / ╰──╯）与日志行；
-    // 先定位 {"decision" 起始的 JSON 对象（比任意 { 更稳），并截到平衡的 }。
     const text = String(raw || '')
-    const start = text.indexOf('{"decision"')
-    if (start === -1) return { ok: false, error: '无裁决 JSON 输出' }
-    // 从 start 起逐字符找平衡的 JSON 结束（简单括号计数即可，JSON 内字符串忽略引号内括号的情况少见）
-    let depth = 0
-    let inStr = false
-    let end = -1
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i]
-      if (inStr) {
-        if (ch === '\\') { i++; continue }
-        if (ch === '"') inStr = false
-        continue
+    // 从后往前找所有 {"decision" 位置
+    let searchFrom = text.length
+    while (true) {
+      const idx = text.lastIndexOf('{"decision"', searchFrom)
+      if (idx === -1) break
+      // 尝试解析该位置的 JSON 对象
+      const parsed = tryParseJsonAt(text, idx)
+      if (parsed !== null && (parsed.decision === 'allowed-once' || parsed.decision === 'rejected')) {
+        return { ok: true, decision: parsed.decision, reason: String(parsed.reason || '') }
       }
-      if (ch === '"') { inStr = true; continue }
-      if (ch === '{') depth++
-      else if (ch === '}') {
-        depth--
-        if (depth === 0) { end = i; break }
-      }
+      // 死循环防护（Hermes 审核 20260831-001）：lastIndexOf 对负 fromIndex 钳为 0，
+      // idx===0 且解析失败时 searchFrom=-1 → lastIndexOf 仍返回 0 → 无限循环。
+      if (idx === 0) break
+      searchFrom = idx - 1
     }
-    if (end === -1) return { ok: false, error: 'JSON 未闭合' }
-    const obj = JSON.parse(text.slice(start, end + 1))
-    if (obj.decision === 'allowed-once' || obj.decision === 'rejected') {
-      return { ok: true, decision: obj.decision, reason: String(obj.reason || '') }
-    }
-    return { ok: false, error: `decision 非法: ${obj.decision}` }
+    return { ok: false, error: '无合法裁决 JSON 输出' }
   } catch (e) {
     return { ok: false, error: `解析失败: ${e.message}` }
+  }
+}
+
+/** 尝试从 text[start] 解析一个平衡 JSON 对象；失败返回 null。 */
+function tryParseJsonAt(text, start) {
+  let depth = 0
+  let inStr = false
+  let end = -1
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (inStr) {
+      if (ch === '\\') { i++; continue }
+      if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') { inStr = true; continue }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) { end = i; break }
+    }
+  }
+  if (end === -1) return null
+  try {
+    return JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return null
   }
 }
 
