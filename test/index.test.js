@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   defaultConfig, validateConfig, decide, makeAuditEntry,
   rejectReason, buildHermesPrompt, parseHermesVerdict,
-  buildQnaPrompt, parseQnaVerdict,
+  buildQnaPrompt, parseQnaVerdict, withRetry,
 } from '../src/policy.js'
 
 const mkReq = (toolName, reason = 'r', callId = 'c1') => ({
@@ -168,4 +168,39 @@ test('userGranted 未命中时 prompt 无背书信号', () => {
 test('userGranted 缺省/非数组时 validateConfig 处理', () => {
   assert.equal(validateConfig({ mode: 'hermes', userGranted: 'not-array' }).ok, false)
   assert.equal(validateConfig({ mode: 'hermes', userGranted: ['bash'] }).ok, true)
+})
+
+test('withRetry: 首次成功不重试 (retry=0)', async () => {
+  let calls = 0
+  const r = await withRetry(async () => { calls++; return { ok: true, decision: 'allowed-once' } }, 2, () => Promise.resolve())
+  assert.equal(r.retry, 0)
+  assert.equal(calls, 1)
+})
+
+test('withRetry: 首次失败、第 1 次重试成功 (retry=1)', async () => {
+  let calls = 0
+  const r = await withRetry(async () => { calls++; return calls === 1 ? { ok: false, error: 'x' } : { ok: true, decision: 'rejected' } }, 2, () => Promise.resolve())
+  assert.equal(r.retry, 1)
+  assert.equal(calls, 2)
+})
+
+test('withRetry: 全部失败 → 转人工 (retry=2)', async () => {
+  let calls = 0
+  const r = await withRetry(async () => { calls++; return { ok: false, error: 'fail' } }, 2, () => Promise.resolve())
+  assert.equal(r.retry, 2)
+  assert.equal(calls, 3)
+})
+
+test('withRetry: 超时不重试 (timeout 立即返回)', async () => {
+  let calls = 0
+  const r = await withRetry(async () => { calls++; return { ok: false, error: 'Hermes 超时', timeout: true } }, 2, () => Promise.resolve())
+  assert.equal(r.timeout, true)
+  assert.equal(calls, 1)
+})
+
+test('withRetry: hermesRetry=0 一次失败即返回', async () => {
+  let calls = 0
+  const r = await withRetry(async () => { calls++; return { ok: false, error: 'x' } }, 0, () => Promise.resolve())
+  assert.equal(r.retry, 0)
+  assert.equal(calls, 1)
 })

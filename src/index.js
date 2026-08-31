@@ -26,7 +26,7 @@ import { randomUUID } from 'node:crypto'
 import {
   defaultConfig, validateConfig, decide, rejectReason,
   buildHermesPrompt, parseHermesVerdict, makeAuditEntry,
-  buildQnaPrompt, parseQnaVerdict,
+  buildQnaPrompt, parseQnaVerdict, withRetry,
 } from './policy.js'
 
 const execFileAsync = promisify(execFile)
@@ -43,19 +43,29 @@ async function askHermes(config, prompt) {
     })
     return stdout
   } catch (err) {
+    // 区分超时与快速失败（审核 20260831-010：超时不重试，避免危险升级卡死）
+    if (err.killed || err.signal === 'SIGTERM' || /timeout|ETIMEDOUT/i.test(err.message)) {
+      const e = new Error(`Hermes 超时（${config.hermesTimeoutSecs}s）`)
+      e.timeout = true
+      throw e
+    }
     throw new Error(`Hermes 调用失败: ${err.message}`)
   }
 }
 
-/** 调 Hermes Pro 做审批语义裁决。 */
-async function askHermesVerdict(config, req) {
+/** 调 Hermes Pro 做审批语义裁决（快速失败重试 hermesRetry 次；超时不重试）。 */
+async function askHermesVerdict(config, req, alertSink) {
   const prompt = buildHermesPrompt(config, req)
-  try {
+  const maxRetry = Math.min(3, Math.max(0, Number(config.hermesRetry ?? 2) || 2))
+  const verdict = await withRetry(async () => {
     const stdout = await askHermes(config, prompt)
     return parseHermesVerdict(stdout)
-  } catch (err) {
-    return { ok: false, error: err.message }
+  }, maxRetry)
+  // 重试耗尽 → 告警（fail-closed 转人工由调用方处理）
+  if (!verdict.ok && verdict.retry === maxRetry) {
+    try { alertSink?.(`Hermes 裁决连续失败（重试 ${maxRetry} 次后仍失败）: ${verdict.error || ''}`) } catch { /* 告警失败不阻断 */ }
   }
+  return verdict
 }
 
 /** 调 Hermes Pro 回答 ask_user_question（问答接管）。 */
@@ -107,16 +117,18 @@ export function apply(ctx, rawConfig = {}) {
       let decision = decide(config, req)
       let note
 
-      // 规则层判 hermes → 调 Hermes Pro 语义裁决
+      // 规则层判 hermes → 调 Hermes Pro 语义裁决（重试快速失败，超时不重试）
       if (decision === 'hermes') {
-        const verdict = await askHermesVerdict(config, req)
+        const verdict = await askHermesVerdict(config, req, (msg) => {
+          ctx.logger?.warn?.(`[dsh-auto-approver] ${msg}`)
+        })
         if (verdict.ok) {
           decision = verdict.decision
-          note = `hermes: ${verdict.reason}`
+          note = `hermes: ${verdict.reason}${verdict.retry ? ` (retry=${verdict.retry})` : ''}`
         } else {
           // Hermes 不可用 → 转人工（fail-closed，绝不静默放行）
           decision = 'ask'
-          note = `hermes 裁决不可用(${verdict.error})→ 转人工`
+          note = `hermes 裁决不可用(${verdict.error})→ 转人工${verdict.retry ? ` (retry=${verdict.retry})` : ''}${verdict.timeout ? ' (超时不重试)' : ''}`
           ctx.logger?.warn?.(`[dsh-auto-approver] ${note}`)
         }
       }

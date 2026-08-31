@@ -21,6 +21,7 @@ export function defaultConfig() {
     denyReasons: {},   // 工具名 → 拒绝时反馈给 agent 的原因文本
     hermesModel: 'deepseek-v4-pro', // Hermes 裁决模型（Pro 最高能力）
     hermesTimeoutSecs: 90,          // Hermes 裁决超时（秒）
+    hermesRetry: 2,                 // 快速失败重试次数（0-3，默认 2；超时不重试）
     feedbackOnReject: true,         // 拒绝时是否把原因 followup 回发起会话
     qnaMode: 'off',                 // 'hermes'=ask_user_question 交 Hermes Pro 回答；'off'=转人工
     userGranted: [],               // 用户明确授权的工具清单（写入 Hermes prompt 作为背书信号）
@@ -41,6 +42,12 @@ export function validateConfig(cfg) {
   }
   if (cfg.denyReasons !== undefined && (typeof cfg.denyReasons !== 'object' || Array.isArray(cfg.denyReasons))) {
     return { ok: false, error: 'denyReasons 应为对象（工具名 → 原因）' }
+  }
+  if (cfg.hermesRetry !== undefined) {
+    const r = Number(cfg.hermesRetry)
+    if (!Number.isInteger(r) || r < 0 || r > 3) {
+      return { ok: false, error: 'hermesRetry 应为 0-3 的整数' }
+    }
   }
   return { ok: true }
 }
@@ -244,4 +251,30 @@ export function parseQnaVerdict(raw, questions) {
     if (!answers.some((a) => a.id === q.id)) answers.push({ id: q.id, selected: [] })
   }
   return answers
+}
+
+// ── Hermes 重试逻辑（审核 20260831-010：快速失败重试，超时不重试）──
+
+/**
+ * 带重试的调用包装（纯逻辑，注入调用器便于单测）。
+ * @param {Function} call  async () => { ok: true, ... } | { ok: false, error, timeout? }
+ * @param {number} maxRetry 重试次数（0-3）
+ * @param {Function} [sleep] 等待函数（默认 setTimeout；测试可注入 0 等待）
+ * @returns {Promise<{retry:number, ...}>}
+ */
+export async function withRetry(call, maxRetry, sleep = (ms) => new Promise((r) => setTimeout(r, ms))) {
+  const n = Math.min(3, Math.max(0, Number(maxRetry) || 0))
+  let last
+  for (let attempt = 0; attempt <= n; attempt++) {
+    if (attempt > 0) await sleep(2000 + Math.random() * 2000)
+    try {
+      const r = await call()
+      if (r && r.ok) return { ...r, retry: attempt }
+      last = r || { ok: false, error: '无结果' }
+      if (last.timeout) return { ...last, retry: attempt, timeout: true } // 超时不重试
+    } catch (e) {
+      last = { ok: false, error: e.message }
+    }
+  }
+  return { ...last, retry: n }
 }
