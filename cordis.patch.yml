@@ -1,0 +1,12 @@
+# dsh-auto-approver bundle patch: 挂载审批自动代理（宿主级，跨会话共享）。
+# 拦截 approval/request 事件，按策略自动批准/拒绝，人工只在策略未覆盖时被询问。
+# 配置（profile patch 覆盖）：
+#   mode: 'allow-all'  全部自动批准（默认，需谨慎）
+#       | 'allowlist'  仅 allowlist 列出的工具自动批准，其余转人工
+#       | 'off'        关闭自动代理，全部转人工（相当于不装本插件）
+#   allowlist: []      工具名列表（mode=allowlist 时生效）
+#   denyAlways: []     永远拒绝的工具（黑名单，优先于一切）
+#   logPath: 审计日志路径（默认 ~/.dsh/auto-approver.log）
+- insert:
+    - id: dsh-auto-approver
+      name: 'dsh-auto-approver'

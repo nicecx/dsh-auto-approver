@@ -1,0 +1,42 @@
+{
+  "name": "dsh-auto-approver",
+  "version": "0.1.0",
+  "description": "Configurable auto-approval for DeepSeek Harness: intercepts approval/request and answers allowed-once/rejected by policy (allow-all / allowlist / deny-always), with a full audit log — so the human is only asked when the policy says so.",
+  "type": "module",
+  "main": "src/index.js",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nicecx/dsh-auto-approver.git"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "approval",
+    "auto-approve",
+    "permissions",
+    "ops"
+  ],
+  "scripts": {
+    "test": "node --test test/index.test.js",
+    "check": "node --test test/index.test.js"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ]
+}
