@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { defaultConfig, validateConfig, decide, makeAuditEntry } from '../src/policy.js'
+import {
+  defaultConfig, validateConfig, decide, makeAuditEntry,
+  rejectReason, buildHermesPrompt, parseHermesVerdict,
+} from '../src/policy.js'
 
 const mkReq = (toolName, reason = 'r', callId = 'c1') => ({
   toolName, reason, callId,
@@ -58,4 +61,33 @@ test('makeAuditEntry 记录关键字段', () => {
   assert.equal(e.decision, 'allowed-once')
   assert.equal(e.sessionId, 's1')
   assert.ok(e.ts)
+})
+
+test('hermes 模式：白名单直接批，其余交 Hermes', () => {
+  const c = { ...defaultConfig(), mode: 'hermes', allowlist: ['calendar_add'], denyAlways: ['bash'] }
+  assert.equal(decide(c, mkReq('bash')), 'rejected')           // 黑名单优先
+  assert.equal(decide(c, mkReq('calendar_add')), 'allowed-once') // 白名单直接批
+  assert.equal(decide(c, mkReq('web_search')), 'hermes')         // 其余交 Hermes
+  assert.equal(decide(c, mkReq('edit')), 'hermes')
+})
+
+test('parseHermesVerdict 解析各种输出', () => {
+  assert.deepEqual(parseHermesVerdict('{"decision":"allowed-once","reason":"常规操作"}'), { ok: true, decision: 'allowed-once', reason: '常规操作' })
+  assert.deepEqual(parseHermesVerdict('```json\n{"decision":"rejected","reason":"危险"}\n```'), { ok: true, decision: 'rejected', reason: '危险' })
+  assert.equal(parseHermesVerdict('no json').ok, false)
+  assert.equal(parseHermesVerdict('{"decision":"maybe"}').ok, false)
+})
+
+test('rejectReason 优先 denyReasons 配置', () => {
+  const c = { ...defaultConfig(), denyReasons: { bash: '含 rm -rf 危险模式，请改安全写法' } }
+  assert.equal(rejectReason(c, mkReq('bash')), '含 rm -rf 危险模式，请改安全写法')
+  assert.ok(rejectReason(c, mkReq('other')).includes('denyAlways'))
+})
+
+test('buildHermesPrompt 含工具与原因', () => {
+  const c = { ...defaultConfig(), mode: 'hermes' }
+  const p = buildHermesPrompt(c, mkReq('bash', '重载服务'))
+  assert.ok(p.includes('bash'))
+  assert.ok(p.includes('重载服务'))
+  assert.ok(p.includes('allowed-once'))
 })
