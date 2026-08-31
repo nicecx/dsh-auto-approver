@@ -119,3 +119,19 @@ test('parseQnaVerdict 解析序号/标签/自由文本', () => {
   // 空输入
   assert.deepEqual(parseQnaVerdict('', questions)[1].selected, [])
 })
+
+test('parseHermesVerdict 解析带 Hermes 装饰框的真实输出', () => {
+  const raw = '╭─ ⚕ Hermes ───────────────────────╮\n{"decision":"rejected","reason":"理由过于空泛，请补充目标文件与目的"}\n╰──────────────────────────────────╯\nResume this session with: hermes --resume xxx'
+  const r = parseHermesVerdict(raw)
+  assert.equal(r.ok, true)
+  assert.equal(r.decision, 'rejected')
+  assert.ok(r.reason.includes('空泛'))
+})
+
+test('parseHermesVerdict 解析 reason 含引号/括号的 JSON', () => {
+  const raw = '日志行 {\"x\":1} {"decision":"allowed-once","reason":"常规（安全）操作，已检查"}'
+  const r = parseHermesVerdict(raw)
+  assert.equal(r.ok, true)
+  assert.equal(r.decision, 'allowed-once')
+  assert.ok(r.reason.includes('常规'))
+})

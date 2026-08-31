@@ -94,13 +94,34 @@ export function buildHermesPrompt(cfg, req) {
   ].join('\n')
 }
 
-/** 解析 Hermes 返回的裁决 JSON（容错：去代码块、取首个 JSON 对象）。 */
+/** 解析 Hermes 返回的裁决 JSON（容错：去代码块/装饰框、取首个 JSON 对象）。 */
 export function parseHermesVerdict(raw) {
   try {
+    // Hermes oneshot 输出常带装饰框（╭─ ⚕ Hermes ─╮ / ╰──╯）与日志行；
+    // 先定位 {"decision" 起始的 JSON 对象（比任意 { 更稳），并截到平衡的 }。
     const text = String(raw || '')
-    const m = text.match(/\{[\s\S]*?\}/)
-    if (!m) return { ok: false, error: '无 JSON 输出' }
-    const obj = JSON.parse(m[0])
+    const start = text.indexOf('{"decision"')
+    if (start === -1) return { ok: false, error: '无裁决 JSON 输出' }
+    // 从 start 起逐字符找平衡的 JSON 结束（简单括号计数即可，JSON 内字符串忽略引号内括号的情况少见）
+    let depth = 0
+    let inStr = false
+    let end = -1
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]
+      if (inStr) {
+        if (ch === '\\') { i++; continue }
+        if (ch === '"') inStr = false
+        continue
+      }
+      if (ch === '"') { inStr = true; continue }
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) { end = i; break }
+      }
+    }
+    if (end === -1) return { ok: false, error: 'JSON 未闭合' }
+    const obj = JSON.parse(text.slice(start, end + 1))
     if (obj.decision === 'allowed-once' || obj.decision === 'rejected') {
       return { ok: true, decision: obj.decision, reason: String(obj.reason || '') }
     }
